@@ -1233,6 +1233,7 @@ static struct branch_clk vcap_p_clk = {
 static struct clk_freq_tbl clk_tbl_gp[] = {
 	F_GP(        0, gnd,  1, 0, 0),
 	F_GP(  9600000, cxo,  2, 0, 0),
+	F_GP( 12000000, pll8, 4, 1, 8),
 	F_GP( 13500000, pxo,  2, 0, 0),
 	F_GP( 19200000, cxo,  1, 0, 0),
 	F_GP( 27000000, pxo,  1, 0, 0),
@@ -1285,6 +1286,7 @@ static struct clk_freq_tbl clk_tbl_gsbi_uart[] = {
 	F_GSBI_UART( 1843200, pll8, 2,  6, 625),
 	F_GSBI_UART( 3686400, pll8, 2, 12, 625),
 	F_GSBI_UART( 7372800, pll8, 2, 24, 625),
+	F_GSBI_UART( 8000000, pll8, 4,  1,  12),
 	F_GSBI_UART(14745600, pll8, 2, 48, 625),
 	F_GSBI_UART(16000000, pll8, 4,  1,   6),
 	F_GSBI_UART(24000000, pll8, 4,  1,   4),
@@ -5217,7 +5219,11 @@ static struct clk_lookup msm_clocks_8064[] = {
 #else
 	CLK_LOOKUP("core_clk",		gsbi4_uart_clk.c,	""),
 #endif
+#ifdef CONFIG_MACH_LGE
+	CLK_LOOKUP("core_clk",		gsbi5_uart_clk.c, "msm_serial_hs.2"),
+#else
 	CLK_LOOKUP("core_clk",		gsbi5_uart_clk.c,	""),
+#endif
 	CLK_LOOKUP("core_clk",		gsbi6_uart_clk.c,	""),
 #ifdef CONFIG_MACH_LGE
 	CLK_LOOKUP("core_clk",		gsbi7_uart_clk.c,	""),
@@ -5279,6 +5285,7 @@ static struct clk_lookup msm_clocks_8064[] = {
 	CLK_LOOKUP("iface_clk",		gsbi4_p_clk.c,		"qup_i2c.4"),
 	CLK_LOOKUP("iface_clk",		gsbi5_p_clk.c,		"spi_qsd.0"),
 	CLK_LOOKUP("iface_clk",		gsbi5_p_clk.c,		"qup_i2c.5"),
+	CLK_LOOKUP("iface_clk",		gsbi5_p_clk.c,	"msm_serial_hs.2"),
 	CLK_LOOKUP("iface_clk",		gsbi6_p_clk.c,		""),
 #ifdef CONFIG_MACH_LGE
 	CLK_LOOKUP("iface_clk",		gsbi7_p_clk.c,		""),
@@ -5510,6 +5517,9 @@ static struct clk_lookup msm_clocks_8064[] = {
 	CLK_LOOKUP("krait1_mclk",	krait1_m_clk, ""),
 	CLK_LOOKUP("krait2_mclk",	krait2_m_clk, ""),
 	CLK_LOOKUP("krait3_mclk",	krait3_m_clk, ""),
+#ifdef CONFIG_SND_SOC_ES310
+	CLK_LOOKUP("gp0_clk",		gp0_clk.c,	NULL),
+#endif
 };
 
 static struct clk_lookup msm_clocks_8960_common[] __initdata = {
