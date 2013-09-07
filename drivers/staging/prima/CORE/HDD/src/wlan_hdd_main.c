@@ -3329,6 +3329,16 @@ int hdd_wlan_startup(struct device *dev )
 #endif //ANI_BUS_TYPE_SDIO
 
    ENTER();
+
+#ifdef CONFIG_LGE_PRIMACONFIG_INTERFACE
+      if(custom_mac_address.bytes[0]==0 && custom_mac_address.bytes[1]==0 &&
+         custom_mac_address.bytes[2]==0 && custom_mac_address.bytes[3]==0 &&
+         custom_mac_address.bytes[4]==0 && custom_mac_address.bytes[5]==0) {
+         pr_info("wlan: prevented init before setting custom mac\n");
+         return -EIO;
+      }
+#endif
+
 #ifdef CONFIG_CFG80211
    /*
     * cfg80211: wiphy allocation
