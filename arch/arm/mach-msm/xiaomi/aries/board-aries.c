@@ -77,6 +77,7 @@
 #include <mach/restart.h>
 #include <mach/msm_iomap.h>
 #include <mach/msm_serial_hs.h>
+#include <mach/board_xiaomi.h>
 
 #include "msm_watchdog.h"
 #include "board-aries.h"
@@ -745,6 +746,7 @@ static void __init apq8064_reserve(void)
 	apq8064_set_display_params(prim_panel_name, ext_panel_name,
 		ext_resolution);
 	msm_reserve();
+	xiaomi_reserve();
 }
 
 static void __init apq8064_early_reserve(void)
@@ -3387,6 +3389,7 @@ static void __init apq8064_cdp_init(void)
 		SOCINFO_VERSION_MINOR(socinfo_get_platform_version()) == 1)
 			cyttsp_pdata.sleep_gpio = CYTTSP_TS_GPIO_SLEEP_ALT;
 	apq8064_common_init();
+	xiaomi_add_ramconsole_devices();
 	if (machine_is_mpq8064_cdp() || machine_is_mpq8064_hrd() ||
 		machine_is_mpq8064_dtv()) {
 		enable_avc_i2c_bus();
