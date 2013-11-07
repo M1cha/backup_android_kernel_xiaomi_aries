@@ -11,13 +11,11 @@
  *
  */
 #include <linux/kernel.h>
-#include <linux/bitops.h>
 #include <linux/platform_device.h>
 #include <linux/gpio.h>
 #include <linux/io.h>
 #include <linux/irq.h>
 #include <linux/i2c.h>
-#include <linux/i2c/smb349.h>
 #include <linux/i2c/sx150x.h>
 #include <linux/slimbus/slimbus.h>
 #include <linux/mfd/wcd9xxx/core.h>
@@ -32,12 +30,9 @@
 #include <linux/memory.h>
 #include <linux/memblock.h>
 #include <linux/msm_thermal.h>
-#include <linux/i2c/atmel_mxt_ts.h>
-#include <linux/cyttsp-qc.h>
 #include <linux/i2c/isa1200.h>
 #include <linux/gpio_keys.h>
 #include <linux/epm_adc.h>
-#include <linux/i2c/sx150x.h>
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 #include <asm/hardware/gic.h>
