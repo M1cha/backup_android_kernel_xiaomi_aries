@@ -2707,6 +2707,7 @@ static void __init apq8064_aries_init(void)
 #endif
 
 	platform_device_register(&mtp_kp_pdev);
+	apq8064_init_input();
 }
 
 MACHINE_START(APQ8064_MTP, "QCT APQ8064 ARIES")
