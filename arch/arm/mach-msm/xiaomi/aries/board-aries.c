@@ -2692,6 +2692,7 @@ static void __init apq8064_aries_init(void)
 		pr_err("meminfo_init() failed!\n");
 	apq8064_common_init();
 	xiaomi_add_ramconsole_devices();
+	xiaomi_add_backlight_devices();
 	ethernet_init();
 	msm_rotator_set_split_iommu_domain();
 	platform_add_devices(cdp_devices, ARRAY_SIZE(cdp_devices));
