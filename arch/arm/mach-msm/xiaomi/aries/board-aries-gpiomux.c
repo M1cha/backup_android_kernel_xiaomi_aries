@@ -226,6 +226,30 @@ static struct gpiomux_setting gsbi5_active_cfg = {
 	.pull = GPIOMUX_PULL_NONE,
 };
 
+static struct gpiomux_setting gsbi3_suspended_cfg = {
+	.func = GPIOMUX_FUNC_1,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_KEEPER,
+};
+
+static struct gpiomux_setting gsbi3_active_cfg = {
+	.func = GPIOMUX_FUNC_1,
+	.drv = GPIOMUX_DRV_8MA,
+	.pull = GPIOMUX_PULL_NONE,
+};
+
+static struct gpiomux_setting gpio_i2c_config = {
+	.func = GPIOMUX_FUNC_1,
+	.drv = GPIOMUX_DRV_8MA,
+	.pull = GPIOMUX_PULL_NONE,
+};
+
+static struct gpiomux_setting gpio_i2c_config_sus = {
+	.func = GPIOMUX_FUNC_1,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_KEEPER,
+};
+
 static struct gpiomux_setting audience_wakeup_active_cfg = {
 	.func = GPIOMUX_FUNC_GPIO,
 	.drv = GPIOMUX_DRV_8MA,
@@ -347,6 +371,38 @@ static struct msm_gpiomux_config apq8064_hdmi_configs[] __initdata = {
 };
 
 static struct msm_gpiomux_config apq8064_gsbi_configs[] __initdata = {
+	/* GSBI3 I2C QUP SDA */
+	{
+		.gpio = 8,
+	 	.settings = {
+			[GPIOMUX_ACTIVE] = &gsbi3_active_cfg,
+			[GPIOMUX_SUSPENDED] = &gsbi3_suspended_cfg,
+		},
+	},
+	/* GSBI3 I2C QUP SCL */
+	{
+		.gpio = 9,
+	 	.settings = {
+			[GPIOMUX_ACTIVE] = &gsbi3_active_cfg,
+			[GPIOMUX_SUSPENDED] = &gsbi3_suspended_cfg,
+		},
+	},
+	/* GSBI1 QUP I2C_DATA */
+	{
+		.gpio = 20,
+		.settings = {
+			[GPIOMUX_ACTIVE] = &gpio_i2c_config,
+			[GPIOMUX_SUSPENDED] = &gpio_i2c_config_sus,
+		},
+	},
+	/* GSBI1 QUP I2C_CLK */
+	{
+		.gpio = 21,
+		.settings = {
+			[GPIOMUX_ACTIVE] = &gpio_i2c_config,
+			[GPIOMUX_SUSPENDED] =  &gpio_i2c_config_sus,
+		},
+	},
 	/* GSBI5 UART2 TX */
 	{
 		.gpio = 51,
