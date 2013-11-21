@@ -29,6 +29,7 @@ static struct msm_panel_common_pdata *mipi_hitachi_pdata;
 
 static struct dsi_buf hitachi_tx_buf;
 static struct dsi_buf hitachi_rx_buf;
+static struct msm_fb_data_type *local_mfd;
 
 static int mipi_hitachi_lcd_on(struct platform_device *pdev)
 {
@@ -38,6 +39,7 @@ static int mipi_hitachi_lcd_on(struct platform_device *pdev)
 	pr_info("%s started\n", __func__);
 
 	mfd = platform_get_drvdata(pdev);
+	local_mfd = mfd;
 	if (!mfd)
 		return -ENODEV;
 	if (mfd->key != MFD_KEY)
@@ -95,6 +97,11 @@ static int mipi_hitachi_lcd_off(struct platform_device *pdev)
 static void mipi_hitachi_lcd_shutdown(void)
 {
 	int ret = 0;
+
+	if(local_mfd && !local_mfd->panel_power_on) {
+		pr_info("%s:panel is already off\n", __func__);
+		return;
+	}
 
 	MIPI_OUTP(MIPI_DSI_BASE + 0x38, 0x10000000);
 	ret = mipi_dsi_cmds_tx(&hitachi_tx_buf,
