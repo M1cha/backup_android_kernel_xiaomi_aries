@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -10,7 +10,6 @@
  * GNU General Public License for more details.
  */
 
-#include <linux/module.h>
 #include <linux/msm_adsp.h>
 #include <linux/uaccess.h>
 #include <linux/fs.h>
@@ -19,6 +18,7 @@
 #include <linux/pm_qos.h>
 #include <linux/delay.h>
 #include <linux/wait.h>
+#include <linux/module.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-subdev.h>
 #include <media/msm_isp.h>
@@ -352,6 +352,256 @@ static uint32_t op_mode;
 static uint32_t raw_mode;
 static struct vfe2x_ctrl_type *vfe2x_ctrl;
 
+static unsigned long vfe2x_stats_dqbuf(enum msm_stats_enum_type stats_type)
+{
+	struct msm_stats_meta_buf *buf = NULL;
+	int rc = 0;
+
+	rc = vfe2x_ctrl->stats_ops.dqbuf(vfe2x_ctrl->stats_ops.stats_ctrl,
+							  stats_type, &buf);
+	if (rc < 0) {
+		CDBG("%s: dq stats buf (type = %d) err = %d",
+			   __func__, stats_type, rc);
+		return 0;
+	}
+	return buf->paddr;
+}
+
+static unsigned long vfe2x_stats_flush_enqueue(
+	enum msm_stats_enum_type stats_type)
+{
+	struct msm_stats_bufq *bufq = NULL;
+	struct msm_stats_meta_buf *stats_buf = NULL;
+	int rc = 0;
+	int i;
+
+	/*
+	 * Passing NULL for ion client as the buffers are already
+	 * mapped at this stage, client is not required, flush all
+	 * the buffers, and buffers move to PREPARE state
+	 */
+	rc = vfe2x_ctrl->stats_ops.bufq_flush(
+			vfe2x_ctrl->stats_ops.stats_ctrl,
+			stats_type, NULL);
+	if (rc < 0) {
+		pr_err("%s: dq stats buf (type = %d) err = %d",
+			 __func__, stats_type, rc);
+		return 0L;
+	}
+
+	/* Queue all the buffers back to QUEUED state */
+	bufq = vfe2x_ctrl->stats_ctrl.bufq[stats_type];
+	for (i = 0; i < bufq->num_bufs; i++) {
+		stats_buf = &bufq->bufs[i];
+		rc = vfe2x_ctrl->stats_ops.enqueue_buf(
+				vfe2x_ctrl->stats_ops.stats_ctrl,
+				&(stats_buf->info), NULL);
+			if (rc < 0) {
+				pr_err("%s: dq stats buf (type = %d) err = %d",
+					 __func__, stats_type, rc);
+				return rc;
+			}
+	}
+	return 0L;
+}
+
+static unsigned long vfe2x_stats_unregbuf(
+	struct msm_stats_reqbuf *req_buf)
+{
+	int i = 0, rc = 0;
+
+	for (i = 0; i < req_buf->num_buf; i++) {
+		rc = vfe2x_ctrl->stats_ops.buf_unprepare(
+			vfe2x_ctrl->stats_ops.stats_ctrl,
+			req_buf->stats_type, i,
+			vfe2x_ctrl->stats_ops.client);
+		if (rc < 0) {
+			pr_err("%s: unreg stats buf (type = %d) err = %d",
+				__func__, req_buf->stats_type, rc);
+		return rc;
+		}
+	}
+	return 0L;
+}
+
+static int vfe2x_stats_buf_init(enum msm_stats_enum_type type)
+{
+	unsigned long flags;
+	int i = 0, rc = 0;
+	if (type == MSM_STATS_TYPE_AF) {
+		spin_lock_irqsave(&vfe2x_ctrl->stats_bufq_lock, flags);
+		rc = vfe2x_stats_flush_enqueue(MSM_STATS_TYPE_AF);
+		if (rc < 0) {
+			pr_err("%s: dq stats buf err = %d",
+				 __func__, rc);
+			spin_unlock_irqrestore(&vfe2x_ctrl->stats_bufq_lock,
+				flags);
+			return -EINVAL;
+		}
+		spin_unlock_irqrestore(&vfe2x_ctrl->stats_bufq_lock, flags);
+	}
+	for (i = 0; i < 3; i++) {
+		spin_lock_irqsave(&vfe2x_ctrl->stats_bufq_lock, flags);
+		if (type == MSM_STATS_TYPE_AE_AW)
+			vfe2x_ctrl->stats_we_buf_ptr[i] =
+				vfe2x_stats_dqbuf(type);
+		else
+			vfe2x_ctrl->stats_af_buf_ptr[i] =
+				vfe2x_stats_dqbuf(type);
+		spin_unlock_irqrestore(&vfe2x_ctrl->stats_bufq_lock, flags);
+		if (!vfe2x_ctrl->stats_we_buf_ptr[i]) {
+			pr_err("%s: dq error type %d ", __func__, type);
+			return -ENOMEM;
+		}
+	}
+	return rc;
+}
+
+static unsigned long vfe2x_stats_enqueuebuf(
+	struct msm_stats_buf_info *info, struct vfe_stats_ack *sack)
+{
+	struct msm_stats_bufq *bufq = NULL;
+	struct msm_stats_meta_buf *stats_buf = NULL;
+	struct msm_stats_meta_buf *buf = NULL;
+	int rc = 0;
+
+	bufq = vfe2x_ctrl->stats_ctrl.bufq[info->type];
+	stats_buf = &bufq->bufs[info->buf_idx];
+
+	CDBG("vfe2x_stats_enqueuebuf: %d\n", stats_buf->state);
+	if (stats_buf->state == MSM_STATS_BUFFER_STATE_INITIALIZED ||
+		stats_buf->state == MSM_STATS_BUFFER_STATE_PREPARED) {
+		rc = vfe2x_ctrl->stats_ops.enqueue_buf(
+				&vfe2x_ctrl->stats_ctrl,
+				info, vfe2x_ctrl->stats_ops.client);
+		if (rc < 0) {
+			pr_err("%s: enqueue_buf (type = %d), index : %d, err = %d",
+				 __func__, info->type, info->buf_idx, rc);
+			return rc;
+		}
+
+	} else {
+		rc = vfe2x_ctrl->stats_ops.querybuf(
+				vfe2x_ctrl->stats_ops.stats_ctrl, info, &buf);
+		if (rc < 0) {
+			pr_err("%s: querybuf (type = %d), index : %d, err = %d",
+				__func__, info->type, info->buf_idx, rc);
+			return rc;
+	}
+		stats_buf->state = MSM_STATS_BUFFER_STATE_DEQUEUED;
+	if (info->type == MSM_STATS_TYPE_AE_AW) {
+		sack->header = VFE_STATS_WB_EXP_ACK;
+		sack->bufaddr = (void *)(uint32_t *)buf->paddr;
+	} else if (info->type == MSM_STATS_TYPE_AF) {
+		sack->header = VFE_STATS_AUTOFOCUS_ACK;
+		sack->bufaddr = (void *)(uint32_t *)buf->paddr;
+	} else
+		pr_err("%s: Invalid stats: should never come here\n", __func__);
+	}
+	return 0L;
+}
+
+static long vfe2x_stats_bufq_sub_ioctl(struct msm_vfe_cfg_cmd *cmd,
+	void *ion_client)
+{
+	long rc = 0;
+
+	switch (cmd->cmd_type) {
+	case VFE_CMD_STATS_REQBUF:
+		if (!vfe2x_ctrl->stats_ops.stats_ctrl) {
+			/* stats_ctrl has not been init yet */
+			rc = msm_stats_buf_ops_init(
+					&vfe2x_ctrl->stats_ctrl,
+					(struct ion_client *)ion_client,
+					&vfe2x_ctrl->stats_ops);
+			if (rc < 0) {
+				pr_err("%s: cannot init stats ops", __func__);
+				goto end;
+			}
+			rc = vfe2x_ctrl->stats_ops.stats_ctrl_init(
+					&vfe2x_ctrl->stats_ctrl);
+			if (rc < 0) {
+				pr_err("%s: cannot init stats_ctrl ops",
+					 __func__);
+				memset(&vfe2x_ctrl->stats_ops, 0,
+				sizeof(vfe2x_ctrl->stats_ops));
+				goto end;
+			}
+			if (sizeof(struct msm_stats_reqbuf) != cmd->length) {
+				/* error. the length not match */
+				pr_err("%s: stats reqbuf input size = %d,\n"
+					"struct size = %d, mismatch\n",
+					__func__, cmd->length,
+					sizeof(struct msm_stats_reqbuf));
+				rc = -EINVAL;
+				goto end;
+			}
+		}
+		rc = vfe2x_ctrl->stats_ops.reqbuf(
+				&vfe2x_ctrl->stats_ctrl,
+				(struct msm_stats_reqbuf *)cmd->value,
+				vfe2x_ctrl->stats_ops.client);
+		break;
+		case VFE_CMD_STATS_ENQUEUEBUF: {
+			if (sizeof(struct msm_stats_buf_info) != cmd->length) {
+				/* error. the length not match */
+				pr_err("%s: stats enqueuebuf input size = %d,\n"
+					"struct size = %d, mismatch\n",
+					 __func__, cmd->length,
+					sizeof(struct msm_stats_buf_info));
+				rc = -EINVAL;
+				goto end;
+		}
+		rc = vfe2x_ctrl->stats_ops.enqueue_buf(
+				&vfe2x_ctrl->stats_ctrl,
+				(struct msm_stats_buf_info *)cmd->value,
+				vfe2x_ctrl->stats_ops.client);
+	}
+	break;
+	case VFE_CMD_STATS_FLUSH_BUFQ: {
+		struct msm_stats_flush_bufq *flush_req = NULL;
+		flush_req = (struct msm_stats_flush_bufq *)cmd->value;
+		if (sizeof(struct msm_stats_flush_bufq) != cmd->length) {
+			/* error. the length not match */
+			pr_err("%s: stats flush queue input size = %d,\n"
+				"struct size = %d, mismatch\n",
+				__func__, cmd->length,
+				sizeof(struct msm_stats_flush_bufq));
+				rc = -EINVAL;
+				goto end;
+		}
+		rc = vfe2x_ctrl->stats_ops.bufq_flush(
+				&vfe2x_ctrl->stats_ctrl,
+				(enum msm_stats_enum_type)flush_req->stats_type,
+				vfe2x_ctrl->stats_ops.client);
+	}
+	break;
+	case VFE_CMD_STATS_UNREGBUF:
+	{
+		struct msm_stats_reqbuf *req_buf = NULL;
+		req_buf = (struct msm_stats_reqbuf *)cmd->value;
+		if (sizeof(struct msm_stats_reqbuf) != cmd->length) {
+			/* error. the length not match */
+			pr_err("%s: stats reqbuf input size = %d,\n"
+				"struct size = %d, mitch match\n",
+				 __func__, cmd->length,
+				sizeof(struct msm_stats_reqbuf));
+			rc = -EINVAL ;
+			goto end;
+		}
+		rc = vfe2x_stats_unregbuf(req_buf);
+	}
+	break;
+	default:
+		rc = -1;
+		pr_err("%s: cmd_type %d not supported",
+			 __func__, cmd->cmd_type);
+	break;
+	}
+end:
+	return rc;
+}
+
 static void vfe2x_send_isp_msg(
 	struct vfe2x_ctrl_type *vctrl,
 	uint32_t isp_msg_id)
@@ -371,6 +621,7 @@ static void vfe_send_outmsg(struct v4l2_subdev *sd, uint8_t msgid,
 	struct isp_msg_output msg;
 
 	msg.output_id = msgid;
+	msg.buf.inst_handle = 0;
 	msg.buf.ch_paddr[0]     = ch0_paddr;
 	msg.buf.ch_paddr[1]     = ch1_paddr;
 	msg.frameCounter = vfe2x_ctrl->vfeFrameId;
@@ -384,10 +635,25 @@ static void vfe_send_outmsg(struct v4l2_subdev *sd, uint8_t msgid,
 static void vfe_send_stats_msg(uint32_t buf_addr, uint32_t msg_id)
 {
 	struct isp_msg_stats msg_stats;
+	void *vaddr = NULL;
+	int rc;
 
 	msg_stats.frameCounter = vfe2x_ctrl->vfeFrameId;
 	msg_stats.buffer       = buf_addr;
 	msg_stats.id           = msg_id;
+
+	if (MSG_ID_STATS_AWB_AEC == msg_id)
+		rc = vfe2x_ctrl->stats_ops.dispatch(
+			vfe2x_ctrl->stats_ops.stats_ctrl,
+			MSM_STATS_TYPE_AE_AW, buf_addr,
+			&msg_stats.buf_idx, &vaddr, &msg_stats.fd,
+			vfe2x_ctrl->stats_ops.client);
+	else if (MSG_ID_STATS_AF == msg_id)
+		rc = vfe2x_ctrl->stats_ops.dispatch(
+			vfe2x_ctrl->stats_ops.stats_ctrl,
+			MSM_STATS_TYPE_AF, buf_addr,
+			&msg_stats.buf_idx, &vaddr, &msg_stats.fd,
+			vfe2x_ctrl->stats_ops.client);
 
 	v4l2_subdev_notify(&vfe2x_ctrl->subdev,
 				NOTIFY_VFE_MSG_STATS,
@@ -570,12 +836,7 @@ static void vfe_7x_ops(void *driver_data, unsigned id, size_t len,
 				kfree(data);
 				return;
 			}
-			if (vfe2x_ctrl->liveshot_enabled)
-				free_buf = vfe2x_check_free_buffer(
-					VFE_MSG_OUTPUT_IRQ,
-					VFE_MSG_V2X_LIVESHOT_PRIMARY);
-			else
-				free_buf = vfe2x_check_free_buffer(
+			free_buf = vfe2x_check_free_buffer(
 					VFE_MSG_OUTPUT_IRQ,
 					VFE_MSG_OUTPUT_PRIMARY);
 			CDBG("free_buf = %x\n",
@@ -1080,6 +1341,7 @@ static void vfe2x_subdev_notify(int id, int path)
 	CDBG("vfe2x_subdev_notify : msgId = %d\n", id);
 	rp.evt_msg.type   = MSM_CAMERA_MSG;
 	rp.evt_msg.msg_id = path;
+	rp.evt_msg.data = NULL;
 	rp.type	   = id;
 	v4l2_subdev_notify(&vfe2x_ctrl->subdev, NOTIFY_VFE_BUF_EVT, &rp);
 	spin_unlock_irqrestore(&vfe2x_ctrl->sd_notify_lock, flags);
@@ -1091,14 +1353,12 @@ static struct msm_free_buf *vfe2x_check_free_buffer(int id, int path)
 
 	vfe2x_subdev_notify(id, path);
 	if (op_mode & SNAPSHOT_MASK_MODE) {
-		if (path == VFE_MSG_OUTPUT_PRIMARY ||
-				path == VFE_MSG_V2X_LIVESHOT_PRIMARY)
+		if (path == VFE_MSG_OUTPUT_PRIMARY)
 			outch = &vfe2x_ctrl->snap;
 		else if (path == VFE_MSG_OUTPUT_SECONDARY)
 			outch = &vfe2x_ctrl->thumb;
 	} else {
-		if (path == VFE_MSG_OUTPUT_PRIMARY ||
-				path == VFE_MSG_V2X_LIVESHOT_PRIMARY) {
+		if (path == VFE_MSG_OUTPUT_PRIMARY) {
 			if (vfe2x_ctrl->zsl_mode)
 				outch = &vfe2x_ctrl->zsl_prim;
 			else
@@ -1120,14 +1380,12 @@ static int vfe2x_configure_pingpong_buffers(int id, int path)
 	vfe2x_subdev_notify(id, path);
 	CDBG("Opmode = %d\n", op_mode);
 	if (op_mode & SNAPSHOT_MASK_MODE) {
-		if (path == VFE_MSG_OUTPUT_PRIMARY ||
-				path == VFE_MSG_V2X_LIVESHOT_PRIMARY)
+		if (path == VFE_MSG_OUTPUT_PRIMARY)
 			outch = &vfe2x_ctrl->snap;
 		else if (path == VFE_MSG_OUTPUT_SECONDARY)
 			outch = &vfe2x_ctrl->thumb;
 	} else {
-		if (path == VFE_MSG_OUTPUT_PRIMARY ||
-				path == VFE_MSG_V2X_LIVESHOT_PRIMARY) {
+		if (path == VFE_MSG_OUTPUT_PRIMARY) {
 			if (vfe2x_ctrl->zsl_mode)
 				outch = &vfe2x_ctrl->zsl_prim;
 			else
@@ -1155,12 +1413,10 @@ static struct buf_info *vfe2x_get_ch(int path)
 	if (op_mode & SNAPSHOT_MASK_MODE) {
 		if (path == VFE_MSG_OUTPUT_SECONDARY)
 			ch = &vfe2x_ctrl->thumb;
-		else if (path == VFE_MSG_OUTPUT_PRIMARY ||
-					path == VFE_MSG_V2X_LIVESHOT_PRIMARY)
+		else if (path == VFE_MSG_OUTPUT_PRIMARY)
 			ch = &vfe2x_ctrl->snap;
 	} else {
-		if (path == VFE_MSG_OUTPUT_PRIMARY ||
-					path == VFE_MSG_V2X_LIVESHOT_PRIMARY) {
+		if (path == VFE_MSG_OUTPUT_PRIMARY) {
 			if (vfe2x_ctrl->zsl_mode)
 				ch = &vfe2x_ctrl->zsl_prim;
 			else
@@ -1177,12 +1433,11 @@ static long msm_vfe_subdev_ioctl(struct v4l2_subdev *sd,
 			unsigned int subdev_cmd, void *arg)
 {
 	struct msm_isp_cmd vfecmd;
-	struct msm_camvfe_params *vfe_params =
-		(struct msm_camvfe_params *)arg;
-	struct msm_vfe_cfg_cmd *cmd = vfe_params->vfe_cfg;
+	struct msm_camvfe_params *vfe_params;
+	struct msm_vfe_cfg_cmd *cmd;
 	struct table_cmd *table_pending;
 	long rc = 0;
-	void *data = vfe_params->data;
+	void *data;
 
 	struct msm_pmem_region *regptr;
 	unsigned char buf[256];
@@ -1203,22 +1458,69 @@ static long msm_vfe_subdev_ioctl(struct v4l2_subdev *sd,
 	struct vfe_outputack fack;
 
 	CDBG("msm_vfe_subdev_ioctl is called\n");
+	if (subdev_cmd == VIDIOC_MSM_VFE_INIT) {
+		CDBG("%s init\n", __func__);
+		return msm_vfe_subdev_init(sd);
+	} else if (subdev_cmd == VIDIOC_MSM_VFE_RELEASE) {
+		msm_vfe_subdev_release(sd);
+		return 0;
+	}
+
+	vfe_params = (struct msm_camvfe_params *)arg;
+	cmd = vfe_params->vfe_cfg;
+	data = vfe_params->data;
+
 	if (cmd->cmd_type != CMD_FRAME_BUF_RELEASE &&
-	    cmd->cmd_type != CMD_STATS_BUF_RELEASE &&
-	    cmd->cmd_type != CMD_STATS_AF_BUF_RELEASE &&
+		cmd->cmd_type != CMD_STATS_BUF_RELEASE &&
+		cmd->cmd_type != CMD_STATS_AF_BUF_RELEASE &&
 		cmd->cmd_type != CMD_CONFIG_PING_ADDR &&
 		cmd->cmd_type != CMD_CONFIG_PONG_ADDR &&
 		cmd->cmd_type != CMD_CONFIG_FREE_BUF_ADDR &&
-		cmd->cmd_type != CMD_VFE_BUFFER_RELEASE) {
+		cmd->cmd_type != CMD_VFE_BUFFER_RELEASE &&
+		cmd->cmd_type != VFE_CMD_STATS_REQBUF &&
+		cmd->cmd_type != VFE_CMD_STATS_FLUSH_BUFQ &&
+		cmd->cmd_type != VFE_CMD_STATS_UNREGBUF &&
+		cmd->cmd_type != VFE_CMD_STATS_ENQUEUEBUF) {
 		if (copy_from_user(&vfecmd,
-				(void __user *)(cmd->value),
-				sizeof(vfecmd))) {
+			   (void __user *)(cmd->value),
+			   sizeof(vfecmd))) {
 			pr_err("copy_from_user in msm_vfe_subdev_ioctl fail\n");
 			return -EFAULT;
 		}
 	}
-
 	switch (cmd->cmd_type) {
+	case VFE_CMD_STATS_REQBUF:
+	case VFE_CMD_STATS_FLUSH_BUFQ:
+	case VFE_CMD_STATS_UNREGBUF:
+		/* for easy porting put in one envelope */
+		rc = vfe2x_stats_bufq_sub_ioctl(cmd, vfe_params->data);
+		return rc;
+	case VFE_CMD_STATS_ENQUEUEBUF:
+		if (sizeof(struct msm_stats_buf_info) != cmd->length) {
+			/* error. the length not match */
+			pr_err("%s: stats enqueuebuf input size = %d,\n"
+				"struct size = %d, mitch match\n",\
+				__func__, cmd->length,
+				sizeof(struct msm_stats_buf_info));
+			rc = -EINVAL;
+			return rc;
+		}
+		sack.header = 0;
+		sack.bufaddr = NULL;
+		rc = vfe2x_stats_enqueuebuf(cmd->value, &sack);
+		if (rc < 0) {
+			pr_err("%s: error", __func__);
+			rc = -EINVAL;
+			return rc;
+		}
+		if (sack.header != 0 && sack.bufaddr != NULL) {
+			queue  = QDSP_CMDQUEUE;
+			vfecmd.length = sizeof(struct vfe_stats_ack) - 4;
+			cmd_data = &sack;
+		} else {
+			return 0;
+		}
+	break;
 	case CMD_VFE_BUFFER_RELEASE: {
 		if (!(vfe2x_ctrl->vfe_started) || op_mode == 1)
 			return 0;
@@ -1279,7 +1581,6 @@ static long msm_vfe_subdev_ioctl(struct v4l2_subdev *sd,
 	}
 		return 0;
 
-	case CMD_STATS_AEC_AWB_ENABLE:
 	case CMD_STATS_AXI_CFG: {
 		axid = data;
 		if (!axid) {
@@ -1334,15 +1635,49 @@ static long msm_vfe_subdev_ioctl(struct v4l2_subdev *sd,
 		}
 	}
 		break;
-	case CMD_STATS_AF_ENABLE:
-	case CMD_STATS_AF_AXI_CFG: {
-		CDBG("CMD_STATS_AF_ENABLE CMD_STATS_AF_AXI_CFG\n");
-		axid = data;
-		if (!axid) {
-			rc = -EFAULT;
+	case CMD_STATS_AEC_AWB_ENABLE: {
+		pr_err("CMD_STATS_AEC_AWB_ENABLE\n");
+		scfg =
+			kmalloc(sizeof(struct vfe_stats_we_cfg),
+				GFP_ATOMIC);
+		if (!scfg) {
+			rc = -ENOMEM;
 			goto config_failure;
 		}
 
+		if (copy_from_user((char *)scfg + 4,
+					(void __user *)(vfecmd.value),
+					vfecmd.length)) {
+
+			rc = -EFAULT;
+			goto config_done;
+		}
+
+		header = cmds_map[vfecmd.id].vfe_id;
+		queue = cmds_map[vfecmd.id].queue;
+		if (header == -1 && queue == -1) {
+			rc = -EFAULT;
+			goto config_failure;
+		}
+		*(uint32_t *)scfg = header;
+		rc = vfe2x_stats_buf_init(MSM_STATS_TYPE_AE_AW);
+		if (rc < 0) {
+			pr_err("%s: cannot config ping/pong address of AWB",
+				 __func__);
+			goto config_failure;
+		}
+		scfg->wb_expstatoutputbuffer[0] =
+			(void *)vfe2x_ctrl->stats_we_buf_ptr[0];
+		scfg->wb_expstatoutputbuffer[1] =
+			(void *)vfe2x_ctrl->stats_we_buf_ptr[1];
+		scfg->wb_expstatoutputbuffer[2] =
+			(void *)vfe2x_ctrl->stats_we_buf_ptr[2];
+		cmd_data = scfg;
+	}
+	break;
+	case CMD_STATS_AF_ENABLE:
+	case CMD_STATS_AF_AXI_CFG: {
+		CDBG("CMD_STATS_AF_ENABLE CMD_STATS_AF_AXI_CFG\n");
 		sfcfg =
 			kmalloc(sizeof(struct vfe_stats_af_cfg),
 				GFP_ATOMIC);
@@ -1360,9 +1695,6 @@ static long msm_vfe_subdev_ioctl(struct v4l2_subdev *sd,
 			goto config_done;
 		}
 
-		CDBG("AF_ENABLE: bufnum = %d, enabling = %d\n",
-			axid->bufnum1, sfcfg->af_enable);
-
 		header = cmds_map[vfecmd.id].vfe_id;
 		queue = cmds_map[vfecmd.id].queue;
 		if (header == -1 && queue == -1) {
@@ -1370,27 +1702,16 @@ static long msm_vfe_subdev_ioctl(struct v4l2_subdev *sd,
 			goto config_failure;
 		}
 		*(uint32_t *)sfcfg = header;
-		CDBG("Number of buffers = %d\n", axid->bufnum1);
-		if (axid->bufnum1 > 0) {
-			regptr = &axid->region[0];
-
-			for (i = 0; i < axid->bufnum1; i++) {
-
-				CDBG("STATS_ENABLE, phy = 0x%lx\n",
-					regptr->paddr);
-
-				sfcfg->af_outbuf[i] =
-					(void *)regptr->paddr;
-
-				regptr++;
-			}
-
-			cmd_data = sfcfg;
-
-		} else {
-			rc = -EINVAL;
-			goto config_done;
+		rc = vfe2x_stats_buf_init(MSM_STATS_TYPE_AF);
+		sfcfg->af_outbuf[0] = (void *)vfe2x_ctrl->stats_af_buf_ptr[0];
+		sfcfg->af_outbuf[1] = (void *)vfe2x_ctrl->stats_af_buf_ptr[1];
+		sfcfg->af_outbuf[2] = (void *)vfe2x_ctrl->stats_af_buf_ptr[2];
+		if (rc < 0) {
+			pr_err("%s: cannot config ping/pong address of AWB",
+				__func__);
+			goto config_failure;
 		}
+		cmd_data = sfcfg;
 	}
 		break;
 	case CMD_SNAP_BUF_RELEASE:
@@ -1597,11 +1918,11 @@ static long msm_vfe_subdev_ioctl(struct v4l2_subdev *sd,
 		}
 		if (op_mode & SNAPSHOT_MASK_MODE)
 			rc = vfe2x_configure_pingpong_buffers(
-						VFE_MSG_V2X_CAPTURE,
+						VFE_MSG_CAPTURE,
 						VFE_MSG_OUTPUT_SECONDARY);
 		else
 			rc = vfe2x_configure_pingpong_buffers(
-						VFE_MSG_V2X_PREVIEW,
+						VFE_MSG_PREVIEW,
 						VFE_MSG_OUTPUT_SECONDARY);
 		if (rc < 0) {
 			pr_err("%s error configuring pingpong buffers"
@@ -1651,11 +1972,11 @@ static long msm_vfe_subdev_ioctl(struct v4l2_subdev *sd,
 		if (!vfe2x_ctrl->reconfig_vfe) {
 			if (op_mode & SNAPSHOT_MASK_MODE)
 				rc = vfe2x_configure_pingpong_buffers(
-						VFE_MSG_V2X_CAPTURE,
+						VFE_MSG_CAPTURE,
 						VFE_MSG_OUTPUT_PRIMARY);
 			else
 				rc = vfe2x_configure_pingpong_buffers(
-						VFE_MSG_V2X_PREVIEW,
+						VFE_MSG_PREVIEW,
 						VFE_MSG_OUTPUT_PRIMARY);
 			if (rc < 0) {
 				pr_err("%s error configuring pingpong buffers"
@@ -1716,10 +2037,10 @@ static long msm_vfe_subdev_ioctl(struct v4l2_subdev *sd,
 		}
 		if (!vfe2x_ctrl->reconfig_vfe) {
 				rc = vfe2x_configure_pingpong_buffers(
-						VFE_MSG_V2X_PREVIEW,
+						VFE_MSG_PREVIEW,
 						VFE_MSG_OUTPUT_PRIMARY);
 				rc = vfe2x_configure_pingpong_buffers(
-						VFE_MSG_V2X_PREVIEW,
+						VFE_MSG_PREVIEW,
 						VFE_MSG_OUTPUT_SECONDARY);
 			if (rc < 0) {
 				pr_err("%s error configuring pingpong buffers"
@@ -1780,11 +2101,11 @@ static long msm_vfe_subdev_ioctl(struct v4l2_subdev *sd,
 		}
 		if (op_mode & SNAPSHOT_MASK_MODE)
 			rc = vfe2x_configure_pingpong_buffers(
-						VFE_MSG_V2X_CAPTURE,
+						VFE_MSG_CAPTURE,
 						VFE_MSG_OUTPUT_SECONDARY);
 		else
 			rc = vfe2x_configure_pingpong_buffers(
-						VFE_MSG_V2X_PREVIEW,
+						VFE_MSG_PREVIEW,
 						VFE_MSG_OUTPUT_SECONDARY);
 		if (rc < 0) {
 			pr_err("%s error configuring pingpong buffers"
@@ -1822,11 +2143,11 @@ static long msm_vfe_subdev_ioctl(struct v4l2_subdev *sd,
 
 		if (op_mode & SNAPSHOT_MASK_MODE)
 			rc = vfe2x_configure_pingpong_buffers(
-						VFE_MSG_V2X_CAPTURE,
+						VFE_MSG_CAPTURE,
 						VFE_MSG_OUTPUT_PRIMARY);
 		else
 			rc = vfe2x_configure_pingpong_buffers(
-						VFE_MSG_V2X_PREVIEW,
+						VFE_MSG_PREVIEW,
 						VFE_MSG_OUTPUT_PRIMARY);
 		if (rc < 0) {
 			pr_err("%s error configuring pingpong buffers"
@@ -1877,7 +2198,7 @@ static long msm_vfe_subdev_ioctl(struct v4l2_subdev *sd,
 		}
 		header = cmds_map[vfecmd.id].vfe_id;
 		queue = cmds_map[vfecmd.id].queue;
-		rc = vfe2x_configure_pingpong_buffers(VFE_MSG_V2X_CAPTURE,
+		rc = vfe2x_configure_pingpong_buffers(VFE_MSG_CAPTURE,
 						VFE_MSG_OUTPUT_PRIMARY);
 		if (rc < 0) {
 			pr_err("%s error configuring pingpong buffers"
@@ -1959,11 +2280,16 @@ static struct msm_cam_clk_info vfe2x_clk_info[] = {
 	{"vfe_clk", 192000000},
 };
 
-int msm_vfe_subdev_init(struct v4l2_subdev *sd,
-		struct msm_cam_media_controller *mctl)
+int msm_vfe_subdev_init(struct v4l2_subdev *sd)
 {
 	int rc = 0;
-	v4l2_set_subdev_hostdata(sd, mctl);
+	struct msm_cam_media_controller *mctl;
+	mctl = v4l2_get_subdev_hostdata(sd);
+	if (mctl == NULL) {
+		pr_err("%s: mctl is NULL\n", __func__);
+		rc = -EINVAL;
+		goto mctl_failed;
+	}
 
 	spin_lock_init(&vfe2x_ctrl->sd_notify_lock);
 	spin_lock_init(&vfe2x_ctrl->table_lock);
@@ -1976,6 +2302,8 @@ int msm_vfe_subdev_init(struct v4l2_subdev *sd,
 	stopevent.state = 0;
 	vfe2x_ctrl->vfe_started = 0;
 
+	memset(&vfe2x_ctrl->stats_ctrl, 0, sizeof(struct msm_stats_bufq_ctrl));
+	memset(&vfe2x_ctrl->stats_ops, 0, sizeof(struct msm_stats_ops));
 
 	CDBG("msm_cam_clk_enable: enable vfe_clk\n");
 	rc = msm_cam_clk_enable(&vfe2x_ctrl->pdev->dev, vfe2x_clk_info,
@@ -2015,11 +2343,11 @@ get_qcam_fail:
 	kfree(extdata);
 init_fail:
 	extlen = 0;
+mctl_failed:
 	return rc;
 }
 
-int msm_vpe_subdev_init(struct v4l2_subdev *sd,
-			struct msm_cam_media_controller *mctl)
+int msm_vpe_subdev_init(struct v4l2_subdev *sd)
 {
 	return 0;
 }
@@ -2083,6 +2411,8 @@ static const struct v4l2_subdev_internal_ops msm_vfe_internal_ops;
 
 static int __devinit vfe2x_probe(struct platform_device *pdev)
 {
+	struct msm_cam_subdev_info sd_info;
+
 	CDBG("%s: device id = %d\n", __func__, pdev->id);
 	vfe2x_ctrl = kzalloc(sizeof(struct vfe2x_ctrl_type), GFP_KERNEL);
 	if (!vfe2x_ctrl) {
@@ -2099,7 +2429,16 @@ static int __devinit vfe2x_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, &vfe2x_ctrl->subdev);
 
 	vfe2x_ctrl->pdev = pdev;
-	msm_cam_register_subdev_node(&vfe2x_ctrl->subdev, VFE_DEV, 0);
+	sd_info.sdev_type = VFE_DEV;
+	sd_info.sd_index = 0;
+	sd_info.irq_num = 0;
+	msm_cam_register_subdev_node(&vfe2x_ctrl->subdev, &sd_info);
+
+	media_entity_init(&vfe2x_ctrl->subdev.entity, 0, NULL, 0);
+	vfe2x_ctrl->subdev.entity.type = MEDIA_ENT_T_V4L2_SUBDEV;
+	vfe2x_ctrl->subdev.entity.group_id = VFE_DEV;
+	vfe2x_ctrl->subdev.entity.name = pdev->name;
+	vfe2x_ctrl->subdev.entity.revision = vfe2x_ctrl->subdev.devnode->num;
 	return 0;
 }
 

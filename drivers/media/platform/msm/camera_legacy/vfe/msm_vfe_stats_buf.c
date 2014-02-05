@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -119,6 +119,7 @@ static int msm_stats_reqbuf(struct msm_stats_bufq_ctrl *stats_ctrl,
 		} else {
 			/* good case. need to de-reqbuf */
 			kfree(stats_ctrl->bufq[idx]->bufs);
+			stats_ctrl->bufq[idx]->bufs = NULL;
 			kfree(stats_ctrl->bufq[idx]);
 			stats_ctrl->bufq[idx] = NULL;
 			goto end;
@@ -362,7 +363,7 @@ static int msm_stats_dqbuf(struct msm_stats_bufq_ctrl *stats_ctrl,
 		}
 	}
 	if (!(*pp_stats_buf)) {
-		pr_err("%s: no free stats buf, type = %d",
+		D("%s: no free stats buf, type = %d",
 			__func__, stats_type);
 		rc = -1;
 		return rc;
@@ -475,6 +476,8 @@ static int msm_stats_enqueue_buf(struct msm_stats_bufq_ctrl *stats_ctrl,
 	struct msm_stats_buf_info *info, struct ion_client *client)
 {
 	int rc = 0;
+	D("%s: stats type : %d, idx : %d\n", __func__,
+		info->type, info->buf_idx);
 	rc = msm_stats_buf_prepare(stats_ctrl, info, client);
 	if (rc < 0) {
 		pr_err("%s: buf_prepare failed, rc = %d", __func__, rc);

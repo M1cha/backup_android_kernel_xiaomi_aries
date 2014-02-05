@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2012, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -325,8 +325,8 @@ enum  vfe_recording_state {
 #define V31_OPERATION_CFG_LEN     32
 
 #define V31_AXI_OUT_OFF           0x00000038
-#define V31_AXI_OUT_LEN           212
-#define V31_AXI_CH_INF_LEN        24
+#define V31_AXI_OUT_LEN           220
+#define V31_AXI_CH_INF_LEN        32
 #define V31_AXI_CFG_LEN           47
 
 #define V31_FRAME_SKIP_OFF        0x00000504
