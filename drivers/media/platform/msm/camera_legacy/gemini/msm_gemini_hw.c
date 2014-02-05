@@ -1,4 +1,4 @@
-/* Copyright (c) 2010, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2010,2013 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -297,6 +297,8 @@ void msm_gemini_hw_we_buffer_update(struct msm_gemini_hw_buf *p_input,
 
 	struct msm_gemini_hw_cmd *hw_cmd_p;
 
+	pr_debug("%s:%d] pingpong index %d", __func__, __LINE__,
+		pingpong_index);
 	if (pingpong_index == 0) {
 		hw_cmd_p = &hw_cmd_we_ping_update[0];
 
@@ -431,7 +433,7 @@ void msm_gemini_hw_delay(struct msm_gemini_hw_cmd *hw_cmd_p, int m_us)
 	}
 }
 
-int msm_gemini_hw_exec_cmds(struct msm_gemini_hw_cmd *hw_cmd_p, int m_cmds)
+int msm_gemini_hw_exec_cmds(struct msm_gemini_hw_cmd *hw_cmd_p, uint32_t m_cmds)
 {
 	int is_copy_to_user = -1;
 	uint32_t data;
