@@ -163,7 +163,7 @@ static void mdp4_dsi_video_blt_ov_update(struct mdp4_overlay_pipe *pipe);
 static void mdp4_dsi_video_wait4dmap(int cndx);
 static void mdp4_dsi_video_wait4ov(int cndx);
 
-int mdp4_dsi_video_pipe_commit(int cndx, int wait)
+int mdp4_dsi_video_pipe_commit(int cndx, int wait, u32 *release_busy)
 {
 
 	int  i, undx;
@@ -207,6 +207,9 @@ int mdp4_dsi_video_pipe_commit(int cndx, int wait)
 	}
 	mutex_unlock(&vctrl->update_lock);
 
+	/* free previous committed iommu back to pool */
+	mdp4_overlay_iommu_unmap_freelist(mixer);
+
 	spin_lock_irqsave(&vctrl->spin_lock, flags);
 	if (vctrl->ov_koff != vctrl->ov_done) {
 		spin_unlock_irqrestore(&vctrl->spin_lock, flags);
@@ -223,38 +226,9 @@ int mdp4_dsi_video_pipe_commit(int cndx, int wait)
 			cnt++;
 			real_pipe = mdp4_overlay_ndx2pipe(pipe->pipe_ndx);
 			if (real_pipe && real_pipe->pipe_used) {
-				/*
-				 * commit pipes which are in pending queue
-				 * and not be unset yet
-				 */
+				/* pipe not unset */
 				mdp4_overlay_vsync_commit(pipe);
 			}
-		}
-	}
-
-	mdp4_mixer_stage_commit(mixer);
-
-	/* start timing generator & mmu if they are not started yet */
-	mdp4_overlay_dsi_video_start();
-
-	/*
-	 * there has possibility that pipe commit come very close to next vsync
-	 * this may cause two consecutive pie_commits happen within same vsync
-	 * period which casue iommu page fault when previous iommu buffer
-	 * freed. Set ION_IOMMU_UNMAP_DELAYED flag at ion_map_iommu() to
-	 * add delay unmap iommu buffer to fix this problem.
-	 * Also ion_unmap_iommu() may take as long as 9 ms to free an ion buffer.
-	 * therefore mdp4_overlay_iommu_unmap_freelist(mixer) should be called
-	 * ater stage_commit() to ensure pipe_commit (up to stage_commit)
-	 * is completed within vsync period.
-	 */
-
-	/* free previous committed iommu back to pool */
-	mdp4_overlay_iommu_unmap_freelist(mixer);
-
-	pipe = vp->plist;
-	for (i = 0; i < OVERLAY_PIPE_MAX; i++, pipe++) {
-		if (pipe->pipe_used) {
 			/* free previous iommu to freelist
 			* which will be freed at next
 			* pipe_commit
@@ -263,6 +237,11 @@ int mdp4_dsi_video_pipe_commit(int cndx, int wait)
 			pipe->pipe_used = 0; /* clear */
 		}
 	}
+
+	mdp4_mixer_stage_commit(mixer);
+
+	/* start timing generator & mmu if they are not started yet */
+	mdp4_overlay_dsi_video_start();
 
 	pipe = vctrl->base_pipe;
 	spin_lock_irqsave(&vctrl->spin_lock, flags);
@@ -282,6 +261,11 @@ int mdp4_dsi_video_pipe_commit(int cndx, int wait)
 	mdp4_stat.overlay_commit[pipe->mixer_num]++;
 
 	if (wait) {
+		if (release_busy) {
+			msm_fb_release_busy(vctrl->mfd);
+			*release_busy = false;
+			mutex_unlock(&vctrl->mfd->dma->ov_mutex);
+		}
 		if (pipe->ov_blt_addr)
 			mdp4_dsi_video_wait4ov(0);
 		else
@@ -631,8 +615,6 @@ int mdp4_dsi_video_on(struct platform_device *pdev)
 		pipe = vctrl->base_pipe;
 	}
 
-	atomic_set(&vctrl->suspend, 0);
-
 	pipe->src_height = fbi->var.yres;
 	pipe->src_width = fbi->var.xres;
 	pipe->src_h = fbi->var.yres;
@@ -746,6 +728,8 @@ int mdp4_dsi_video_on(struct platform_device *pdev)
 	mdp_histogram_ctrl_all(TRUE);
 	mdp4_overlay_dsi_video_start();
 	mutex_unlock(&mfd->dma->ov_mutex);
+
+	atomic_set(&vctrl->suspend, 0);
 
 	return ret;
 }
@@ -994,6 +978,7 @@ void mdp4_primary_vsync_dsi_video(void)
 	int cndx;
 	struct vsycn_ctrl *vctrl;
 
+
 	cndx = 0;
 	vctrl = &vsync_ctrl_db[cndx];
 	pr_debug("%s: cpu=%d\n", __func__, smp_processor_id());
@@ -1209,7 +1194,7 @@ void mdp4_dsi_video_overlay(struct msm_fb_data_type *mfd)
 
 	mdp4_overlay_mdp_perf_upd(mfd, 1);
 
-	cnt = mdp4_dsi_video_pipe_commit(cndx, 0);
+	cnt = mdp4_dsi_video_pipe_commit(cndx, 1, NULL);
 	if (cnt >= 0) {
 		if (pipe->ov_blt_addr)
 			mdp4_dsi_video_wait4ov(cndx);

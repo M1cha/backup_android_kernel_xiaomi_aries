@@ -44,6 +44,8 @@
 
 #define VERSION_KEY_MASK	0xFFFFFF00
 
+static u64 MDP_BUS_SCALE_MIN_IB_FOR_MAX_LAYERS = 0x60000000;
+
 struct mdp4_overlay_ctrl {
 	struct mdp4_overlay_pipe plist[OVERLAY_PIPE_MAX];
 	struct mdp4_overlay_pipe *stage[MDP4_MIXER_MAX][MDP4_MIXER_STAGE_MAX];
@@ -105,6 +107,7 @@ struct mdp4_overlay_ctrl {
 };
 
 static DEFINE_MUTEX(iommu_mutex);
+static DEFINE_MUTEX(perf_mutex);
 static struct mdp4_overlay_ctrl *ctrl = &mdp4_overlay_db;
 
 struct mdp4_overlay_perf {
@@ -121,8 +124,8 @@ struct mdp4_overlay_perf {
 
 };
 
-struct mdp4_overlay_perf perf_request;
-struct mdp4_overlay_perf perf_current;
+static struct mdp4_overlay_perf perf_request;
+static struct mdp4_overlay_perf perf_current;
 
 void  mdp4_overlay_free_base_pipe(struct msm_fb_data_type *mfd)
 {
@@ -149,9 +152,9 @@ static int mdp4_map_sec_resource(struct msm_fb_data_type *mfd)
 		return -ENODEV;
 	}
 
-	pr_debug("%s %d mfd->index=%d,mapped=%d,active=%d\n",
+	pr_debug("%s %d mfd->index=%d,mapped=%d\n",
 		__func__, __LINE__,
-		 mfd->index, mfd->sec_mapped, mfd->sec_active);
+		 mfd->index, mfd->sec_mapped);
 
 	if (mfd->sec_mapped)
 		return 0;
@@ -174,18 +177,31 @@ static int mdp4_map_sec_resource(struct msm_fb_data_type *mfd)
 int mdp4_unmap_sec_resource(struct msm_fb_data_type *mfd)
 {
 	int ret = 0;
+	int i, sec_cnt = 0;
+	struct mdp4_overlay_pipe *pipe;
+
 
 	if (!mfd) {
 		pr_err("%s: mfd is invalid\n", __func__);
 		return -ENODEV;
 	}
 
-	if ((mfd->sec_mapped == 0) || (mfd->sec_active))
+	if (mfd->sec_mapped == 0)
 		return 0;
 
-	pr_debug("%s %d mfd->index=%d,mapped=%d,active=%d\n",
+	for (i = 0; i < OVERLAY_PIPE_MAX; i++) {
+		pipe = &ctrl->plist[i];
+		if ((pipe->mixer_num == mfd->index) &&
+				pipe->flags & MDP_SECURE_OVERLAY_SESSION)
+			sec_cnt++;
+	}
+
+	if (sec_cnt)
+		return 0;
+
+	pr_debug("%s %d mfd->index=%d,mapped=%d\n",
 		__func__, __LINE__,
-		 mfd->index, mfd->sec_mapped, mfd->sec_active);
+		 mfd->index, mfd->sec_mapped);
 
 	ret = mdp_enable_iommu_clocks();
 	if (ret) {
@@ -1881,7 +1897,6 @@ void mdp4_mixer_stage_commit(int mixer)
 	mdp_clk_ctrl(0);
 }
 
-
 void mdp4_mixer_stage_up(struct mdp4_overlay_pipe *pipe, int commit)
 {
 	struct mdp4_overlay_pipe *pp;
@@ -2839,9 +2854,8 @@ static int mdp4_calc_req_mdp_clk(struct msm_fb_data_type *mfd,
 		yscale <<= shift;
 		yscale /= dst_h;
 	} else {		/* upscale */
-		yscale = dst_h;
+		yscale = 1;
 		yscale <<= shift;
-		yscale /= src_h;
 	}
 
 	yscale *= src_w;
@@ -3017,7 +3031,7 @@ int mdp4_calc_blt_mdp_bw(struct msm_fb_data_type *mfd,
 		pr_err("%s: mfd is null!\n", __func__);
 		return ret;
 	}
-
+	mutex_lock(&perf_mutex);
 	bpp = BLT_BPP;
 	fps = mdp_get_panel_framerate(mfd);
 
@@ -3042,6 +3056,7 @@ int mdp4_calc_blt_mdp_bw(struct msm_fb_data_type *mfd,
 		 perf_req->mdp_ov_ab_bw[pipe->mixer_num],
 		 perf_req->mdp_ov_ib_bw[pipe->mixer_num]);
 
+	mutex_unlock(&perf_mutex);
 	return 0;
 }
 
@@ -3120,6 +3135,7 @@ int mdp4_overlay_mdp_perf_req(struct msm_fb_data_type *mfd)
 		return ret;
 	}
 
+	mutex_lock(&perf_mutex);
 	pipe = ctrl->plist;
 
 	for (i = 0; i < MDP4_MIXER_MAX; i++)
@@ -3127,8 +3143,10 @@ int mdp4_overlay_mdp_perf_req(struct msm_fb_data_type *mfd)
 
 	for (i = 0; i < OVERLAY_PIPE_MAX; i++, pipe++) {
 
-		if (!pipe)
+		if (!pipe) {
+			mutex_unlock(&perf_mutex);
 			return ret;
+		}
 
 		if (!pipe->pipe_used)
 			continue;
@@ -3207,7 +3225,15 @@ int mdp4_overlay_mdp_perf_req(struct msm_fb_data_type *mfd)
 		}
 	}
 
+
 	ib_quota_total = max(ib_quota_total, ib_quota_min);
+
+	/* Flo specific change to increase IB request when we have >4 layers
+	 * but not all of them are covering the whole screen */
+	if (cnt > 4) {
+		ib_quota_total = max(ib_quota_total,
+				MDP_BUS_SCALE_MIN_IB_FOR_MAX_LAYERS);
+	}
 
 	perf_req->mdp_ab_bw = roundup(ab_quota_total, MDP_BUS_SCALE_AB_STEP);
 	perf_req->mdp_ib_bw = roundup(ib_quota_total, MDP_BUS_SCALE_AB_STEP);
@@ -3249,6 +3275,7 @@ int mdp4_overlay_mdp_perf_req(struct msm_fb_data_type *mfd)
 		 perf_req->use_ov_blt[0],
 		 perf_req->use_ov_blt[1]);
 
+	mutex_unlock(&perf_mutex);
 	return 0;
 }
 
@@ -3282,6 +3309,7 @@ void mdp4_overlay_mdp_perf_upd(struct msm_fb_data_type *mfd,
 		 perf_cur->mdp_clk_rate,
 		 flag);
 
+	mutex_lock(&perf_mutex);
 	if (!mdp4_extn_disp)
 		perf_cur->use_ov_blt[1] = 0;
 
@@ -3382,6 +3410,8 @@ void mdp4_overlay_mdp_perf_upd(struct msm_fb_data_type *mfd,
 			perf_cur->use_ov_blt[0] = perf_req->use_ov_blt[0];
 		}
 	}
+
+	mutex_unlock(&perf_mutex);
 	return;
 }
 
@@ -3549,7 +3579,6 @@ int mdp4_overlay_set(struct fb_info *info, struct mdp_overlay *req)
 
 	if (pipe->flags & MDP_SECURE_OVERLAY_SESSION) {
 		mdp4_map_sec_resource(mfd);
-		mfd->sec_active = TRUE;
 	}
 
 	/* return id back to user */
@@ -3665,8 +3694,6 @@ int mdp4_overlay_unset(struct fb_info *info, int ndx)
 
 	mdp4_stat.overlay_unset[pipe->mixer_num]++;
 
-	if (pipe->flags & MDP_SECURE_OVERLAY_SESSION)
-		mfd->sec_active = FALSE;
 	mdp4_overlay_pipe_free(pipe, 0);
 
 	mutex_unlock(&mfd->dma->ov_mutex);
@@ -3959,30 +3986,32 @@ end:
 
 int mdp4_overlay_commit(struct fb_info *info)
 {
-	int ret = 0;
+	int ret = 0, release_busy = true;
 	struct msm_fb_data_type *mfd = (struct msm_fb_data_type *)info->par;
 	int mixer;
 
-	if (mfd == NULL)
-		return -ENODEV;
+	if (mfd == NULL) {
+		ret = -ENODEV;
+		goto mdp4_overlay_commit_exit;
+	}
 
-	if (!mfd->panel_power_on) /* suspended */
-		return -EINVAL;
+	if (!mfd->panel_power_on) {
+		ret = -EINVAL;
+		goto mdp4_overlay_commit_exit;
+	}
 
 	mixer = mfd->panel_info.pdest;	/* DISPLAY_1 or DISPLAY_2 */
 
 	mutex_lock(&mfd->dma->ov_mutex);
 
-	mdp4_overlay_mdp_perf_upd(mfd, 1);
-
 	msm_fb_wait_for_fence(mfd);
 
 	switch (mfd->panel.type) {
 	case MIPI_CMD_PANEL:
-		mdp4_dsi_cmd_pipe_commit(0, 1);
+		mdp4_dsi_cmd_pipe_commit(0, 1, &release_busy);
 		break;
 	case MIPI_VIDEO_PANEL:
-		mdp4_dsi_video_pipe_commit(0, 1);
+		mdp4_dsi_video_pipe_commit(0, 1, &release_busy);
 		break;
 	case LVDS_PANEL:
 	case LCDC_PANEL:
@@ -4001,11 +4030,19 @@ int mdp4_overlay_commit(struct fb_info *info)
 	}
 	msm_fb_signal_timeline(mfd);
 
-	mdp4_overlay_mdp_perf_upd(mfd, 0);
 	mdp4_unmap_sec_resource(mfd);
-	mutex_unlock(&mfd->dma->ov_mutex);
-
+	if (release_busy)
+		mutex_unlock(&mfd->dma->ov_mutex);
+mdp4_overlay_commit_exit:
+	if (release_busy)
+		msm_fb_release_busy(mfd);
 	return ret;
+}
+
+void mdp4_overlay_commit_finish(struct fb_info *info)
+{
+	struct msm_fb_data_type *mfd = (struct msm_fb_data_type *)info->par;
+	mdp4_overlay_mdp_perf_upd(mfd, 0);
 }
 
 struct msm_iommu_ctx {
